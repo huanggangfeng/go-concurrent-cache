@@ -105,12 +105,13 @@ func (c *Cache) Set(key string, object interface{}) {
 
 	i := c.hash(key)
 	c.rwMu[i].Lock()
-	defer c.rwMu[i].Unlock()
 	v, found := c.items[i][key]
+	c.items[i][key] = item
+	c.rwMu[i].Unlock()
+
 	if found && c.onEvicted != nil {
 		c.onEvicted(key, v.Object)
 	}
-	c.items[i][key] = item
 }
 
 // Put an object into cache with a specific expiration time
@@ -129,12 +130,13 @@ func (c *Cache) SetWithExpiration(key string, object interface{}, expiration tim
 
 	i := c.hash(key)
 	c.rwMu[i].Lock()
-	defer c.rwMu[i].Unlock()
 	v, found := c.items[i][key]
+	c.items[i][key] = item
+	c.rwMu[i].Unlock()
+
 	if found && c.onEvicted != nil {
 		c.onEvicted(key, v.Object)
 	}
-	c.items[i][key] = item
 	return nil
 }
 
@@ -154,16 +156,21 @@ func (c *Cache) Replace(key string, object interface{}) error {
 	defer c.mu.RUnlock()
 
 	i := c.hash(key)
-	c.rwMu[i].Lock()
-	defer c.rwMu[i].Unlock()
-	v, found := c.items[i][key]
-	if !found {
+	c.rwMu[i].RLock()
+	if _, found := c.items[i][key]; !found {
+		c.rwMu[i].RUnlock()
 		return ErrNotFound
 	}
-	if c.onEvicted != nil {
+
+	c.rwMu[i].RUnlock()
+	c.rwMu[i].Lock()
+	v, ok := c.items[i][key]
+	c.items[i][key] = item
+	c.rwMu[i].Unlock()
+
+	if ok && c.onEvicted != nil {
 		c.onEvicted(key, v.Object)
 	}
-	c.items[i][key] = item
 	return nil
 }
 
@@ -180,11 +187,13 @@ func (c *Cache) Get(key string) (interface{}, error) {
 	i := c.hash(key)
 	c.rwMu[i].RLock()
 	if v, found := c.items[i][key]; found {
+		// Found the object, but expired
 		if time.Now().After(v.Expiration) {
-			c.rwMu[i].Unlock()
+			c.rwMu[i].RUnlock()
 			return nil, ErrExpired
 		}
 
+		// Found an valid object and no need renew expiration on read, directly return
 		if !c.renewOnGet {
 			c.rwMu[i].RUnlock()
 			return v.Object, nil
@@ -195,7 +204,9 @@ func (c *Cache) Get(key string) (interface{}, error) {
 		if newExpiration.After(v.Expiration) {
 			c.rwMu[i].RUnlock()
 			c.rwMu[i].Lock()
-			v.Expiration = newExpiration
+			if _, ok := c.items[i][key]; ok {
+				c.items[i][key].Expiration = newExpiration
+			}
 			c.rwMu[i].Unlock()
 			return v.Object, nil
 		}
@@ -229,11 +240,14 @@ func (c *Cache) GetWithExpiration(key string) (interface{}, time.Time, error) {
 		if newExpiration.After(v.Expiration) {
 			c.rwMu[i].RUnlock()
 			c.rwMu[i].Lock()
-			v.Expiration = newExpiration
+			if _, ok := c.items[i][key]; ok {
+				c.items[i][key].Expiration = newExpiration
+			}
 			c.rwMu[i].Unlock()
+			return v.Object, v.Expiration, nil
 		}
-		return v.Object, v.Expiration, nil
 	}
+
 	c.rwMu[i].RUnlock()
 	return nil, time.Time{}, ErrNotFound
 }
@@ -252,14 +266,18 @@ func (c *Cache) Delete(keys ...string) {
 			continue
 		}
 		i := c.hash(k)
-		c.rwMu[i].Lock()
+		c.rwMu[i].RLock()
 		if v, found := c.items[i][k]; found {
+			c.rwMu[i].RUnlock()
+			c.rwMu[i].Lock()
 			delete(c.items[i], k)
+			c.rwMu[i].Unlock()
 			if c.onEvicted != nil {
 				c.onEvicted(k, v.Object)
 			}
+		} else {
+			c.rwMu[i].RUnlock()
 		}
-		c.rwMu[i].Unlock()
 	}
 }
 
@@ -306,18 +324,26 @@ func (c *Cache) Touch(key string) (interface{}, error) {
 	defer c.mu.RUnlock()
 
 	i := c.hash(key)
-	c.rwMu[i].Lock()
-	defer c.rwMu[i].Unlock()
-
+	c.rwMu[i].RLock()
 	v, found := c.items[i][key]
 	if !found {
+		c.rwMu[i].RUnlock()
 		return nil, ErrNotFound
 	}
 
 	newExpiration := time.Now().Add(c.expiration)
 	if newExpiration.After(v.Expiration) {
-		c.items[i][key].Expiration = newExpiration
+		c.rwMu[i].RUnlock()
+		c.rwMu[i].Lock()
+		// Double check to make sure the objct exist
+		if _, ok := c.items[i][key]; ok {
+			c.items[i][key].Expiration = newExpiration
+		}
+		c.rwMu[i].Lock()
+		return v.Object, nil
 	}
+
+	c.rwMu[i].RUnlock()
 	return v.Object, nil
 }
 
@@ -432,12 +458,14 @@ func (c *Cache) DeleteExpired() {
 		v, found := c.items[i][k]
 		// Double check
 		if found && time.Now().After(v.Expiration) {
+			delete(c.items[i], k)
+			c.rwMu[i].Unlock()
 			if c.onEvicted != nil {
 				c.onEvicted(k, v.Object)
 			}
-			delete(c.items[i], k)
+		} else {
+			c.rwMu[i].Unlock()
 		}
-		c.rwMu[i].Unlock()
 	}
 }
 
