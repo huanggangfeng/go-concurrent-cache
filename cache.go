@@ -18,6 +18,7 @@ var (
 	ErrNotFound = errors.New("not found")
 	ErrEmptyKey = errors.New("empty key")
 	ErrExpired  = errors.New("expired")
+	ErrInvalid  = errors.New("invliad parameter")
 )
 
 type Item struct {
@@ -72,13 +73,14 @@ type Options struct {
 type HashFunc func(s string) byte
 
 type cache struct {
-	mu         sync.RWMutex
-	expiration time.Duration
-	rwMu       [128]sync.RWMutex
-	items      [128]ItemMap
-	onEvicted  func(string, interface{})
-	hash       HashFunc
-	renewOnGet bool
+	mu              sync.RWMutex
+	expiration      time.Duration
+	cleanupInterval time.Duration
+	rwMu            [128]sync.RWMutex
+	items           [128]ItemMap
+	onEvicted       func(string, interface{})
+	hash            HashFunc
+	renewOnGet      bool
 }
 
 // Default using last byte as the partition key
@@ -111,7 +113,7 @@ func (c *Cache) Set(key string, object interface{}) {
 	c.items[i][key] = item
 }
 
-// Put a object into cache with a specific expiration time
+// Put an object into cache with a specific expiration time
 func (c *Cache) SetWithExpiration(key string, object interface{}, expiration time.Duration) error {
 	if key == "" {
 		return ErrEmptyKey
@@ -179,8 +181,10 @@ func (c *Cache) Get(key string) (interface{}, error) {
 	c.rwMu[i].RLock()
 	if v, found := c.items[i][key]; found {
 		if time.Now().After(v.Expiration) {
+			c.rwMu[i].Unlock()
 			return nil, ErrExpired
 		}
+
 		if !c.renewOnGet {
 			c.rwMu[i].RUnlock()
 			return v.Object, nil
@@ -193,7 +197,9 @@ func (c *Cache) Get(key string) (interface{}, error) {
 			c.rwMu[i].Lock()
 			v.Expiration = newExpiration
 			c.rwMu[i].Unlock()
+			return v.Object, nil
 		}
+		c.rwMu[i].RUnlock()
 		return v.Object, nil
 	}
 	c.rwMu[i].RUnlock()
@@ -233,24 +239,24 @@ func (c *Cache) GetWithExpiration(key string) (interface{}, time.Time, error) {
 }
 
 // Manually delete objects from the cache, Does nothing if the object does not exist
-func (c *Cache) Delete(keys []string) {
-	if keys == nil || len(keys) == 0 {
+func (c *Cache) Delete(keys ...string) {
+	if len(keys) == 0 {
 		return
 	}
 
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 
-	for _, key := range keys {
-		if key == "" {
+	for _, k := range keys {
+		if k == "" {
 			continue
 		}
-		i := c.hash(key)
+		i := c.hash(k)
 		c.rwMu[i].Lock()
-		if v, found := c.items[i][key]; found {
-			delete(c.items[i], key)
+		if v, found := c.items[i][k]; found {
+			delete(c.items[i], k)
 			if c.onEvicted != nil {
-				c.onEvicted(key, v.Object)
+				c.onEvicted(k, v.Object)
 			}
 		}
 		c.rwMu[i].Unlock()
@@ -276,13 +282,13 @@ func (c *Cache) DisableRenewOnGet() {
 // Set the cache expration time which used to calculate object expiration time
 // The value only works for new objects,
 // if RenewExpirationOnGet is enabled, Get an object will re-calculate the expiration time with the new Expiration
-func (c *Cache) SetExpirationTime(expiration time.Duration) {
+func (c *Cache) SetExpiration(expiration time.Duration) {
 	c.mu.Lock()
 	c.expiration = expiration
 	c.mu.Unlock()
 }
 
-func (c *Cache) GetExpirationTime() time.Duration {
+func (c *Cache) GetExpiration() time.Duration {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 	return c.expiration
@@ -426,13 +432,19 @@ func (c *Cache) DeleteExpired() {
 		v, found := c.items[i][k]
 		// Double check
 		if found && time.Now().After(v.Expiration) {
-			delete(c.items[i], k)
 			if c.onEvicted != nil {
 				c.onEvicted(k, v.Object)
 			}
+			delete(c.items[i], k)
 		}
 		c.rwMu[i].Unlock()
 	}
+}
+
+func (c *Cache) Evicted(onEvicted func(string, interface{})) {
+	c.mu.Lock()
+	c.onEvicted = onEvicted
+	c.mu.Unlock()
 }
 
 // Create a Cache
@@ -465,22 +477,21 @@ func New(ctx context.Context, opt Options) *Cache {
 }
 
 // Clear the cache, all objects in cache will be deleted
-func (c *Cache) Clear() {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
-	for i := 0; i < 128; i++ {
-		c.items[i] = make(ItemMap)
-	}
+func (c *Cache) Clean() {
+	go c.cleanup(false)
 }
 
 // Clear the cache, compare to function Clear(), Flush() will call onEvicted for the object in cache
 func (c *Cache) Flush() {
+	go c.cleanup(true)
+}
+
+func (c *cache) cleanup(evict bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
 	for i := 0; i < 128; i++ {
-		if c.onEvicted != nil {
+		if evict && c.onEvicted != nil {
 			for k, v := range c.items[i] {
 				c.onEvicted(k, v.Object)
 			}
