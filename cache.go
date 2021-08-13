@@ -427,7 +427,9 @@ func (c *Cache) DeleteExpired() {
 		// Double check
 		if found && time.Now().After(v.Expiration) {
 			delete(c.items[i], k)
-			c.onEvicted(k, v.Object)
+			if c.onEvicted != nil {
+				c.onEvicted(k, v.Object)
+			}
 		}
 		c.rwMu[i].Unlock()
 	}
