@@ -100,22 +100,16 @@ func (c *Cache) Set(key string, object interface{}) {
 		Expiration: time.Time{},
 	}
 
-	if c.expiration != NoExpiration {
-		item.Expiration = time.Now().Add(c.expiration)
-	}
-
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 
+	if c.expiration != NoExpiration {
+		item.Expiration = time.Now().Add(c.expiration)
+	}
 	i := c.hash(key)
 	c.rwMu[i].Lock()
-	v, found := c.items[i][key]
 	c.items[i][key] = item
 	c.rwMu[i].Unlock()
-
-	if found && c.onEvicted != nil {
-		c.onEvicted(key, v.Object)
-	}
 }
 
 // Put an object into cache with a specific expiration time
@@ -134,13 +128,9 @@ func (c *Cache) SetWithExpiration(key string, object interface{}, expiration tim
 
 	i := c.hash(key)
 	c.rwMu[i].Lock()
-	v, found := c.items[i][key]
 	c.items[i][key] = item
 	c.rwMu[i].Unlock()
 
-	if found && c.onEvicted != nil {
-		c.onEvicted(key, v.Object)
-	}
 	return nil
 }
 
@@ -156,12 +146,11 @@ func (c *Cache) Replace(key string, object interface{}) error {
 		Expiration: time.Time{},
 	}
 
+	c.mu.RLock()
+	defer c.mu.RUnlock()
 	if c.expiration != NoExpiration {
 		item.Expiration = time.Now().Add(c.expiration)
 	}
-
-	c.mu.RLock()
-	defer c.mu.RUnlock()
 
 	i := c.hash(key)
 	c.rwMu[i].RLock()
@@ -172,13 +161,9 @@ func (c *Cache) Replace(key string, object interface{}) error {
 
 	c.rwMu[i].RUnlock()
 	c.rwMu[i].Lock()
-	v, ok := c.items[i][key]
 	c.items[i][key] = item
 	c.rwMu[i].Unlock()
 
-	if ok && c.onEvicted != nil {
-		c.onEvicted(key, v.Object)
-	}
 	return nil
 }
 
@@ -206,7 +191,7 @@ func (c *Cache) Get(key string) (interface{}, error) {
 			return nil, ErrExpired
 		}
 
-		// Found an valid object and no need renew expiration on read, directly return
+		// Directly return if no need to renew the expiration on read
 		if !c.renewOnGet {
 			c.rwMu[i].RUnlock()
 			return v.Object, nil
@@ -503,10 +488,11 @@ func (c *Cache) Evicted(onEvicted func(string, interface{})) {
 // Create a Cache
 func New(ctx context.Context, opt Options) *Cache {
 	c := &cache{
-		hash:       defaultHash,
-		expiration: DefaultExpiration,
-		onEvicted:  opt.Evicted,
-		renewOnGet: opt.RenewExpirationOnGet,
+		hash:            defaultHash,
+		expiration:      DefaultExpiration,
+		cleanupInterval: opt.CleanupInterval,
+		onEvicted:       opt.Evicted,
+		renewOnGet:      opt.RenewExpirationOnGet,
 	}
 
 	c.mu.Lock()
@@ -533,12 +519,12 @@ func New(ctx context.Context, opt Options) *Cache {
 
 // Clear the cache, all objects in cache will be deleted
 func (c *Cache) Clean() {
-	go c.cleanup(false)
+	c.cleanup(false)
 }
 
 // Clear the cache, compare to function Clear(), Flush() will call onEvicted for the object in cache
 func (c *Cache) Flush() {
-	go c.cleanup(true)
+	c.cleanup(true)
 }
 
 func (c *cache) cleanup(evict bool) {
