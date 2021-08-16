@@ -453,7 +453,7 @@ func backgroundCleanup(ctx context.Context, c *Cache, interval time.Duration) {
 	for {
 		select {
 		case <-ticker.C:
-			c.DeleteExpired()
+			c.DeleteExpired(time.Now())
 		case <-ctx.Done():
 			ticker.Stop()
 			return
@@ -462,7 +462,7 @@ func backgroundCleanup(ctx context.Context, c *Cache, interval time.Duration) {
 }
 
 // Delete all expired objects from the cache.
-func (c *Cache) DeleteExpired() {
+func (c *Cache) DeleteExpired(t time.Time) {
 	evictedItems := make([]string, 0, 128)
 	c.mu.RLock()
 	defer c.mu.RUnlock()
@@ -470,7 +470,7 @@ func (c *Cache) DeleteExpired() {
 	for i := 0; i < 128; i++ {
 		c.rwMu[i].RLock()
 		for k, v := range c.items[i] {
-			if time.Now().After(v.Expiration) {
+			if t.After(v.Expiration) {
 				evictedItems = append(evictedItems, k)
 			}
 		}
@@ -482,7 +482,7 @@ func (c *Cache) DeleteExpired() {
 		c.rwMu[i].Lock()
 		v, found := c.items[i][k]
 		// Double check
-		if found && time.Now().After(v.Expiration) {
+		if found && t.After(v.Expiration) {
 			delete(c.items[i], k)
 			c.rwMu[i].Unlock()
 			if c.onEvicted != nil {
