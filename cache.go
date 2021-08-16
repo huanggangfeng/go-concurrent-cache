@@ -15,10 +15,10 @@ const (
 )
 
 var (
-	ErrNotFound = errors.New("not found")
-	ErrEmptyKey = errors.New("empty key")
-	ErrExpired  = errors.New("expired")
-	ErrInvalid  = errors.New("invliad parameter")
+	ErrNotFound  = errors.New("not found")
+	ErrEmptyKey  = errors.New("empty key")
+	ErrExpired   = errors.New("expired")
+	ErrInvalidOp = errors.New("invliad operation")
 )
 
 type Item struct {
@@ -97,7 +97,11 @@ func (c *Cache) Set(key string, object interface{}) {
 
 	item := &Item{
 		Object:     object,
-		Expiration: time.Now().Add(c.expiration),
+		Expiration: time.Time{},
+	}
+
+	if c.expiration != NoExpiration {
+		item.Expiration = time.Now().Add(c.expiration)
 	}
 
 	c.mu.RLock()
@@ -149,7 +153,11 @@ func (c *Cache) Replace(key string, object interface{}) error {
 
 	item := &Item{
 		Object:     object,
-		Expiration: time.Now().Add(c.expiration),
+		Expiration: time.Time{},
+	}
+
+	if c.expiration != NoExpiration {
+		item.Expiration = time.Now().Add(c.expiration)
 	}
 
 	c.mu.RLock()
@@ -187,6 +195,11 @@ func (c *Cache) Get(key string) (interface{}, error) {
 	i := c.hash(key)
 	c.rwMu[i].RLock()
 	if v, found := c.items[i][key]; found {
+		if c.expiration == NoExpiration {
+			c.rwMu[i].RUnlock()
+			return v.Object, nil
+		}
+
 		// Found the object, but expired
 		if time.Now().After(v.Expiration) {
 			c.rwMu[i].RUnlock()
@@ -230,6 +243,10 @@ func (c *Cache) GetWithExpiration(key string) (interface{}, time.Time, error) {
 	i := c.hash(key)
 	c.rwMu[i].RLock()
 	if v, found := c.items[i][key]; found {
+		if c.expiration == NoExpiration {
+			return v.Object, time.Time{}, nil
+		}
+
 		if !c.renewOnGet {
 			c.rwMu[i].RUnlock()
 			return v.Object, v.Expiration, nil
@@ -332,14 +349,14 @@ func (c *Cache) Touch(key string) (interface{}, error) {
 	}
 
 	newExpiration := time.Now().Add(c.expiration)
-	if newExpiration.After(v.Expiration) {
+	if c.expiration != NoExpiration && newExpiration.After(v.Expiration) {
 		c.rwMu[i].RUnlock()
 		c.rwMu[i].Lock()
 		// Double check to make sure the objct exist
 		if _, ok := c.items[i][key]; ok {
 			c.items[i][key].Expiration = newExpiration
 		}
-		c.rwMu[i].Lock()
+		c.rwMu[i].Unlock()
 		return v.Object, nil
 	}
 
@@ -368,6 +385,10 @@ func (c *Cache) GetAllKey() []string {
 // Get all valid object in the cache, return the Keys
 // Don't update expiration time even RenewExpirationOnGet is enabled
 func (c *Cache) GetAllValidKey() []string {
+	if c.expiration == NoExpiration {
+		return c.GetAllKey()
+	}
+
 	keys := make([]string, 0, 128)
 
 	c.mu.RLock()
@@ -406,6 +427,10 @@ func (c *Cache) GetAllObject() map[string]interface{} {
 // Get all valid object in the cache, return the object
 // Don't update expiration time even RenewExpirationOnGet is enabled
 func (c *Cache) GetAllValidObject() map[string]interface{} {
+	if c.expiration == NoExpiration {
+		return c.GetAllObject()
+	}
+
 	items := make(map[string]interface{})
 
 	c.mu.RLock()
@@ -490,8 +515,10 @@ func New(ctx context.Context, opt Options) *Cache {
 		c.items[i] = make(ItemMap)
 	}
 
-	if opt.Expiration != 0 {
+	if opt.Expiration > 0 {
 		c.expiration = opt.Expiration
+	} else {
+		c.expiration = NoExpiration
 	}
 
 	if opt.Hash != nil {
