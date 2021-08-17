@@ -26,5 +26,6 @@ func main() {
 	}
 
 	objects := cache.GetAllObject()
+	cache.Clean()
 }
 ```
