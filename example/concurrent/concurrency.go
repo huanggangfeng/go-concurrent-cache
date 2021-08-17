@@ -55,7 +55,7 @@ func main() {
 		Evicted:              onEvicted,
 	})
 
-	stopTime := time.Now().Add(time.Second * 60)
+	stopTime := time.Now().Add(time.Second * 20)
 	wg.Add(2)
 	go PutObject(stopTime)
 	go DeleteObject(stopTime)
@@ -65,6 +65,7 @@ func main() {
 	}
 
 	wg.Wait()
+	c.Flush()
 	cancel()
 	time.Sleep(time.Second * 1)
 	Summary()
@@ -100,7 +101,7 @@ func GetObject(stop time.Time) {
 			atomic.AddInt64(&cacheMissed, 1)
 		}
 		atomic.AddInt64(&getCount, 1)
-		time.Sleep(time.Microsecond * 20)
+		time.Sleep(time.Microsecond * 10)
 	}
 	wg.Done()
 }
@@ -108,12 +109,14 @@ func GetObject(stop time.Time) {
 func DeleteObject(stop time.Time) {
 	for time.Now().Before(stop) {
 		key := strconv.FormatInt(deleteCount*2, 10)
-		c.Delete(key)
 		_, err := c.Get(key)
-		if err != cache.ErrNotFound {
-			panic("Found an object that has been deleted")
+		if err == nil {
+			c.Delete(key)
+			deleteCount++
+			if _, err := c.Get(key); err != cache.ErrNotFound {
+				panic("Found an object that has been deleted")
+			}
 		}
-		deleteCount++
 		time.Sleep(time.Millisecond * 2)
 	}
 	wg.Done()

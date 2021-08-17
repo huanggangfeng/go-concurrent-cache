@@ -370,14 +370,14 @@ func (c *Cache) GetAllKey() []string {
 // Get all valid object in the cache, return the Keys
 // Don't update expiration time even RenewExpirationOnGet is enabled
 func (c *Cache) GetAllValidKey() []string {
+	c.mu.RLock()
 	if c.expiration == NoExpiration {
+		c.mu.RUnlock()
 		return c.GetAllKey()
 	}
+	defer c.mu.RUnlock()
 
 	keys := make([]string, 0, 128)
-
-	c.mu.RLock()
-	defer c.mu.RUnlock()
 
 	for i := 0; i < 128; i++ {
 		c.rwMu[i].RLock()
@@ -412,14 +412,14 @@ func (c *Cache) GetAllObject() map[string]interface{} {
 // Get all valid object in the cache, return the object
 // Don't update expiration time even RenewExpirationOnGet is enabled
 func (c *Cache) GetAllValidObject() map[string]interface{} {
+	c.mu.RLock()
 	if c.expiration == NoExpiration {
+		c.mu.RUnlock()
 		return c.GetAllObject()
 	}
+	defer c.mu.RUnlock()
 
 	items := make(map[string]interface{})
-
-	c.mu.RLock()
-	defer c.mu.RUnlock()
 
 	for i := 0; i < 128; i++ {
 		c.rwMu[i].RLock()
